@@ -128,6 +128,14 @@ podman run --rm -it --userns=keep-id \
 
 * `/tmp` is a tmpfs: pi-subagents completion archives under `/tmp/pi-subagents-uid-*/`
   vanish at exit; child session logs live under `sessions/` and persist.
+* **Agent-written skills/extensions are rescued, not kept.** `~/.pi/agent/{skills,extensions,
+  prompts,themes}` are image-backed, so anything the agent writes there would vanish. On
+  exit the wrapper diffs the container layer; if it finds files under those directories it
+  copies them to `~/.pi/agent/sandbox-exports/<stamp>-<project>/` and prints how to install
+  them — project-local (`<project>/.pi/`, then `pi --approve`), into the host pi, or into
+  this repo's `agent/` + `./build.sh` for the image. The agent is told this in its prompt and
+  pointed at `<project>/.pi/` for anything that should persist. (This is why the container is
+  not run with `--rm`; it is removed right after the check.)
 
 ## Packages (plugins)
 

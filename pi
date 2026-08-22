@@ -164,9 +164,15 @@ project_mount=(-v "$CWD:$CWD")
 # shellcheck disable=SC2206
 extra=(${PI_SANDBOX_EXTRA_ARGS:-})
 
-# Not exec'd so the EXIT trap can remove $run_dir.
-podman run --rm "${tty_flags[@]}" \
-  --name "pi-${name_tag}-$$" --hostname pi-sandbox \
+cname="pi-${name_tag}-$$"
+trap 'podman rm -f "$cname" >/dev/null 2>&1; rm -rf "$run_dir"' EXIT
+
+# Not exec'd, and not --rm: after pi exits we inspect the container layer for
+# skills/extensions the agent wrote under ~/.pi/agent (which is image-backed and
+# would otherwise be lost), export them to the host, then remove the container.
+rc=0
+podman run "${tty_flags[@]}" \
+  --name "$cname" --hostname pi-sandbox \
   --userns=keep-id \
   --network="$net" \
   --security-opt=no-new-privileges --security-opt=label=disable --cap-drop=ALL \
@@ -178,4 +184,42 @@ podman run --rm "${tty_flags[@]}" \
   -e TERM -e COLORTERM -e LANG -e LC_ALL -e "HOME=$HOME" \
   -e LLAMA_BASE_URL -e LLAMA_API_KEY -e LLAMA_SERVER_URL \
   "${extra[@]}" \
-  "$IMAGE" "$@"
+  "$IMAGE" "$@" || rc=$?
+
+# --- export agent-authored skills/extensions that would be discarded --------
+export_lost_writes() {
+  local kinds="skills extensions prompts themes" changed kind rel dest n=0
+  # `podman diff` default output is "<Type> <Path>"; the --format Go template is
+  # not supported on all podman builds, so parse the default form.
+  changed="$(podman diff "$cname" 2>/dev/null \
+             | awk -v a="$AGENT_DIR" '($1=="A"||$1=="C") && index($2, a"/")==1 {print $2}')" || return 0
+  [ -n "$changed" ] || return 0
+  dest="$AGENT_DIR/sandbox-exports/$(date +%Y%m%d-%H%M%S)-$name_tag"
+  for kind in $kinds; do
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      # only files (podman diff lists parent dirs too)
+      podman cp "$cname:$path" - 2>/dev/null | tar -tf - 2>/dev/null | grep -qv '/$' || continue
+      rel="${path#"$AGENT_DIR/$kind/"}"
+      mkdir -p "$dest/$kind/$(dirname "$rel")"
+      podman cp "$cname:$path" "$dest/$kind/$rel" 2>/dev/null && n=$((n+1))
+    done <<<"$(grep -E "^$AGENT_DIR/$kind/." <<<"$changed" || true)"
+  done
+  [ "$n" -gt 0 ] || return 0
+  cat >&2 <<EOT
+
+pi-sandbox: the agent wrote $n file(s) under ~/.pi/agent/{$(tr ' ' ',' <<<"$kinds")} inside the
+            sandbox. Those directories come from the image and are NOT persistent, so the files
+            were exported to:
+              $dest
+            To install them:
+              project-local (this project only, sandboxed + unsandboxed):
+                cp -r $dest/. $CWD/.pi/   && pi --approve
+              host pi (pi-unsandboxed), global:
+                cp -r $dest/. $AGENT_DIR/
+              sandbox image, global (source of truth is the repo):
+                cp -r $dest/. $SANDBOX_DIR/agent/   && $SANDBOX_DIR/build.sh
+EOT
+}
+[ "$NO_PROJECT" = 1 ] || export_lost_writes
+exit "$rc"
