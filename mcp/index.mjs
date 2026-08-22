@@ -25,6 +25,21 @@ const MAX_OUTPUT_CHARS = 100_000; // cap on text returned to the client
 const MAX_CHILD_STDOUT = 2_000_000; // hard cap on raw child output buffered
 const KNOWN_PROTOCOLS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-09-01"];
 
+// Resolve the pi binary deterministically so the MCP always uses the SANDBOX
+// wrapper regardless of the PATH the server happened to inherit at launch.
+// Override with PI_MCP_BIN; otherwise prefer ~/pi-sandbox/pi, else fall back to PATH.
+function resolvePiBin() {
+  if (process.env.PI_MCP_BIN) return process.env.PI_MCP_BIN;
+  const wrapper = path.join(process.env.HOME || "", "pi-sandbox", "pi");
+  try {
+    fs.accessSync(wrapper, fs.constants.X_OK);
+    return wrapper;
+  } catch {
+    return "pi";
+  }
+}
+const PI_BIN = resolvePiBin();
+
 // ---------------- JSON-RPC over stdio (stdout reserved for protocol) ------
 
 let buffer = "";
@@ -204,7 +219,7 @@ function spawnCapture(argv, { cwd, timeoutMs, filter = null }) {
     };
     let child;
     try {
-      child = spawn("pi", argv, { cwd, stdio: ["ignore", "pipe", "pipe"], env: process.env });
+      child = spawn(PI_BIN, argv, { cwd, stdio: ["ignore", "pipe", "pipe"], env: process.env });
     } catch (e) {
       finish(() => reject(e));
       return;
@@ -372,7 +387,7 @@ async function runPi(args, { fresh }) {
   const timeoutMs = minutes * 60_000;
   const argv = buildArgs(args, { fresh });
   const keepAll = args.include_message_ends === true;
-  log(`${fresh ? "pi_run" : "pi_continue"} cwd=${cwd} bash=${!!args.allow_bash} timeout=${minutes}m keepAll=${keepAll}`);
+  log(`${fresh ? "pi_run" : "pi_continue"} pi=${PI_BIN} cwd=${cwd} bash=${!!args.allow_bash} timeout=${minutes}m keepAll=${keepAll}`);
   const { code, out, err } = await spawnCapture(argv, {
     cwd,
     timeoutMs,
