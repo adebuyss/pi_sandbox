@@ -120,7 +120,7 @@ export default function purgeThinkingExtension(pi: ExtensionAPI) {
 			const leaf = ctx.sessionManager.getLeafEntry();
 			const leafTs = leaf?.timestamp ? Date.parse(leaf.timestamp) : NaN;
 			if (!leaf || !Number.isFinite(leafTs)) {
-				ctx.ui.notify("No session entries yet — nothing to purge.", "warn");
+				ctx.ui.notify("No session entries yet — nothing to purge.", "warning");
 				return;
 			}
 
