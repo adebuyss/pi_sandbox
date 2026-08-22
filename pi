@@ -55,7 +55,11 @@ if ! podman image exists "$IMAGE"; then
   exit 1
 fi
 
+# Attach stdin only when it can deliver EOF (tty, pipe, regular file). Agent
+# harnesses often hand us a socket that never closes; `pi -p` would then wait
+# on it forever, so run those with stdin from /dev/null instead.
 tty_flags=(-i); [ -t 0 ] && [ -t 1 ] && tty_flags=(-it)
+if [ -S /dev/stdin ]; then tty_flags=(); exec </dev/null; fi
 
 # --- host loopback ports reachable from inside (pasta -T) ---------------------
 ports="${PI_SANDBOX_PORTS:-8080 11434}"
