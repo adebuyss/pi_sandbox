@@ -3,7 +3,7 @@
  * pi-mcp — expose the pi coding agent (headless) as MCP tools for any MCP
  * client (Claude Code, Cursor, Claude Desktop, ...).
  *
- * Zero dependencies. Node 18+. Stdio transport. No build step.
+ * Zero dependencies. Node 22+ (pi requires >=22.19). Stdio transport. No build step.
  *
  * Requires the `pi` CLI on PATH (npm i -g @earendil-works/pi-coding-agent).
  * The child pi process inherits the server's environment, so pi's normal

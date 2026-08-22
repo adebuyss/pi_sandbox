@@ -3,7 +3,7 @@
 Expose the **pi** coding agent (headless) as **MCP tools** for any MCP client —
 Claude Code, Claude Desktop, Cursor, or anything else that speaks MCP over stdio.
 
-Zero dependencies. Node 18+. No build step. ~250 lines.
+Zero dependencies. Node 22+ (pi itself needs ≥ 22.19). No build step. ~250 lines.
 
 ```
 claude (MCP client)  --stdio-->  index.mjs  --spawns-->  pi -p "<task>" --mode json
