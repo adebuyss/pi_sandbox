@@ -6,3 +6,5 @@
 mcp/test-output.txt
 # kept locally only
 /disabled-extensions/
+# project-local pi config (agent-authored skills/extensions)
+/.pi/
