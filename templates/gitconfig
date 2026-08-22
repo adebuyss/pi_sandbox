@@ -1,0 +1,12 @@
+# Rendered by the wrapper and mounted read-only at ~/.gitconfig inside the sandbox.
+# Identity only: no credentials, no helpers, so commits work but pushes cannot.
+# To use a fixed file instead, put one at <repo>/gitconfig (gitignored).
+[user]
+	name = __GIT_NAME__
+	email = __GIT_EMAIL__
+[safe]
+	directory = *
+[push]
+	default = nothing
+[init]
+	defaultBranch = main

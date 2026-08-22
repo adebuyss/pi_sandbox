@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# Sandboxed `pi`: runs the pi coding agent in a rootless podman container with
+# only the current directory and selected ~/.pi/agent state mounted. Packages,
+# extensions and skills come from the image (see Containerfile / agent/).
+#
+# Env knobs:
+#   PI_SANDBOX_EXTRA_ARGS      extra `podman run` args, e.g. "-v $HOME/data:/data:ro"
+#   PI_SANDBOX_PORTS           host loopback ports forwarded into the container
+#                              (default: "8080 11434" + the port in LLAMA_BASE_URL)
+#   PI_SANDBOX_ALL_SESSIONS=1  mount every project's sessions (default: only this cwd's)
+#   PI_SANDBOX_ALLOW_HOME=1    allow running from $HOME (mounts your whole home dir!)
+#   PI_SANDBOX_DEV=1           overlay this repo's agent/extensions + agent/skills (ro)
+#                              on top of the image copies, for editing without a rebuild
+#   PI_SANDBOX_IDE=1           VS Code integration (pi-ide-bridge): forward the bridge
+#                              port + bootstrap port 45721 and pass PI_IDE_BRIDGE_* through.
+#                              Run pi from VS Code's integrated terminal. Off by default;
+#                              without it the PI_IDE_BRIDGE_* variables are scrubbed.
+#   PI_SANDBOX_CLIPBOARD=1     pass the host Wayland socket in so Ctrl+V image paste works.
+#                              WARNING: makes the container a client of your desktop
+#                              session (clipboard read/write, windows). Off by default;
+#                              without it the display/clipboard env vars are scrubbed.
+#   PI_SANDBOX_GIT_NAME/EMAIL  git identity inside (else host git config, else $USER)
+#   PI_SANDBOX_IMAGE           image name (default localhost/pi-sandbox)
+#   LLAMA_BASE_URL             passed through for pi's built-in llama.cpp provider
+#   LLAMA_SERVER_URL           passed through for llama-server style packages
+set -euo pipefail
+
+IMAGE="${PI_SANDBOX_IMAGE:-localhost/pi-sandbox}"
+SANDBOX_DIR="$(dirname "$(readlink -f "$0")")"
+AGENT_DIR="$HOME/.pi/agent"
+CWD="$(pwd -P)"
+
+for tool in podman jq; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "pi-sandbox: '$tool' is required on the host" >&2; exit 1; }
+done
+
+# Informational flags need no project mount: run them from an empty tmpfs workdir.
+NO_PROJECT=0
+case "${1:-}" in --list-models|--version|--help|-h|-v|list) NO_PROJECT=1 ;; esac
+
+case "$CWD" in
+  "$HOME"|/)
+    if [ "$NO_PROJECT" = 1 ]; then CWD=/tmp/pi-noproject
+    elif [ "${PI_SANDBOX_ALLOW_HOME:-0}" = 1 ] && [ "$CWD" = "$HOME" ]; then
+      echo "pi-sandbox: PI_SANDBOX_ALLOW_HOME=1 — mounting all of $HOME into the container." >&2
+    else
+      echo "pi-sandbox: refusing to mount '$CWD' into the container (that would expose everything)." >&2
+      echo "            cd into a project directory, set PI_SANDBOX_ALLOW_HOME=1, or use pi-unsandboxed." >&2
+      exit 2
+    fi ;;
+esac
+
+if ! podman image exists "$IMAGE"; then
+  echo "pi-sandbox: image $IMAGE not found; run $SANDBOX_DIR/build.sh" >&2
+  exit 1
+fi
+
+tty_flags=(-i); [ -t 0 ] && [ -t 1 ] && tty_flags=(-it)
+
+# --- host loopback ports reachable from inside (pasta -T) ---------------------
+ports="${PI_SANDBOX_PORTS:-8080 11434}"
+for u in "${LLAMA_BASE_URL:-}" "${LLAMA_SERVER_URL:-}"; do
+  if [[ "$u" =~ :([0-9]+)(/|$) ]]; then ports="$ports ${BASH_REMATCH[1]}"; fi
+done
+
+# --- IDE bridge (pi-ide-bridge <-> VS Code companion on host loopback) --------
+# Scrubbed unless requested so the sandbox cannot even probe for an IDE.
+ide_args=(--unsetenv PI_IDE_BRIDGE_SERVER_PORT --unsetenv PI_IDE_BRIDGE_AUTH_TOKEN --unsetenv PI_IDE_BRIDGE_BOOTSTRAP_AUTH_TOKEN)
+if [ "${PI_SANDBOX_IDE:-0}" = 1 ]; then
+  ports="$ports 45721"                                   # bootstrap /resolveBridgeForPi
+  if [[ "${PI_IDE_BRIDGE_SERVER_PORT:-}" =~ ^[0-9]+$ ]]; then
+    ports="$ports $PI_IDE_BRIDGE_SERVER_PORT"            # direct bridge port (set by VS Code's terminal)
+  else
+    echo "pi-sandbox: PI_SANDBOX_IDE=1 but PI_IDE_BRIDGE_SERVER_PORT is not set — start pi from VS Code's integrated terminal for a reliable connection; falling back to the bootstrap port only." >&2
+  fi
+  ide_args=(-e PI_IDE_BRIDGE_SERVER_PORT -e PI_IDE_BRIDGE_AUTH_TOKEN -e PI_IDE_BRIDGE_BOOTSTRAP_AUTH_TOKEN)
+fi
+net="pasta:$(printf -- '-T,%s,' $(tr ' ' '\n' <<<"$ports" | sort -un) | sed 's/,$//')"
+
+# --- persistent state under ~/.pi/agent --------------------------------------
+# Only these are mounted; npm/, git/, extensions/, skills/ come from the image.
+mkdir -p "$AGENT_DIR"
+state_mounts=()
+
+# settings.json is the user's (model, theme, packages). On a fresh machine seed it
+# from the repo copy so the baked packages are actually enabled.
+[ -e "$AGENT_DIR/settings.json" ] || cp "$SANDBOX_DIR/agent/settings.json" "$AGENT_DIR/settings.json"
+for f in models-store.json run-history.jsonl; do [ -e "$AGENT_DIR/$f" ] || : > "$AGENT_DIR/$f"; done
+for f in settings.json models-store.json run-history.jsonl; do
+  state_mounts+=(-v "$AGENT_DIR/$f:$AGENT_DIR/$f")
+done
+for f in auth.json models.json; do
+  [ -e "$AGENT_DIR/$f" ] && state_mounts+=(-v "$AGENT_DIR/$f:$AGENT_DIR/$f:ro")
+done
+for d in audit missions powerline-footer web-search-cache; do
+  mkdir -p "$AGENT_DIR/$d"
+  state_mounts+=(-v "$AGENT_DIR/$d:$AGENT_DIR/$d")
+done
+
+# Sessions: only this project's dir unless asked for all. Mirrors pi's
+# getDefaultSessionDirPath(): "--" + cwd minus leading "/" with [/\:] -> "-" + "--".
+if [ "${PI_SANDBOX_ALL_SESSIONS:-0}" = 1 ]; then
+  mkdir -p "$AGENT_DIR/sessions"
+  state_mounts+=(-v "$AGENT_DIR/sessions:$AGENT_DIR/sessions")
+elif [ "$NO_PROJECT" = 0 ]; then
+  key="--$(sed -e 's#^/##' -e 's#[/\\:]#-#g' <<<"$CWD")--"
+  mkdir -p "$AGENT_DIR/sessions/$key"
+  state_mounts+=(-v "$AGENT_DIR/sessions/$key:$AGENT_DIR/sessions/$key")
+fi
+
+# Drift check: packages in the host settings.json vs. what the image was built with.
+host_sha="$(jq -cS '.packages // []' "$AGENT_DIR/settings.json" | sha256sum | cut -c1-16)"
+image_sha="$(podman image inspect --format '{{index .Config.Labels "pi-sandbox.packages-sha"}}' "$IMAGE" 2>/dev/null || true)"
+if [ -n "$image_sha" ] && [ "$host_sha" != "$image_sha" ]; then
+  echo "pi-sandbox: packages in $AGENT_DIR/settings.json differ from the image's ($SANDBOX_DIR/agent/settings.json)." >&2
+  echo "            Packages missing from the image will not load. Sync the two and run $SANDBOX_DIR/build.sh." >&2
+fi
+
+# --- rendered templates (git identity, context-mode permissions) -------------
+run_dir="$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/pi-sandbox.XXXXXX")"
+trap 'rm -rf "$run_dir"' EXIT
+
+if [ -e "$SANDBOX_DIR/gitconfig" ]; then
+  cp "$SANDBOX_DIR/gitconfig" "$run_dir/gitconfig"
+else
+  git_name="${PI_SANDBOX_GIT_NAME:-$(git config --global user.name 2>/dev/null || true)}"
+  git_email="${PI_SANDBOX_GIT_EMAIL:-$(git config --global user.email 2>/dev/null || true)}"
+  git_name="${git_name:-$(id -un)}"; git_email="${git_email:-$(id -un)@localhost}"
+  sed -e "s|__GIT_NAME__|$git_name|" -e "s|__GIT_EMAIL__|$git_email|" \
+      "$SANDBOX_DIR/templates/gitconfig" > "$run_dir/gitconfig"
+fi
+sed -e "s|__HOME__|$HOME|g" "$SANDBOX_DIR/templates/claude-settings.json" > "$run_dir/claude-settings.json"
+
+# --- clipboard / display: scrubbed unless explicitly requested -----------------
+# pi's Ctrl+V image paste shells out to wl-paste, which needs the compositor socket.
+# Default: strip every display-related variable so nothing inside can even try.
+clip_args=(--unsetenv WAYLAND_DISPLAY --unsetenv DISPLAY --unsetenv XDG_RUNTIME_DIR --unsetenv XDG_SESSION_TYPE)
+if [ "${PI_SANDBOX_CLIPBOARD:-0}" = 1 ]; then
+  wl_sock="${XDG_RUNTIME_DIR:-}/${WAYLAND_DISPLAY:-}"
+  if [ -z "${WAYLAND_DISPLAY:-}" ] || [ ! -S "$wl_sock" ]; then
+    echo "pi-sandbox: PI_SANDBOX_CLIPBOARD=1 but no Wayland socket (WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-}')." >&2
+    exit 2
+  fi
+  echo "pi-sandbox: PI_SANDBOX_CLIPBOARD=1 — the container can read/write your clipboard and talk to your compositor." >&2
+  clip_args=(-v "$wl_sock:$wl_sock" -e WAYLAND_DISPLAY -e XDG_RUNTIME_DIR -e XDG_SESSION_TYPE=wayland --unsetenv DISPLAY)
+fi
+
+dev_mounts=()
+if [ "${PI_SANDBOX_DEV:-0}" = 1 ]; then
+  dev_mounts=(-v "$SANDBOX_DIR/agent/extensions:$AGENT_DIR/extensions:ro"
+              -v "$SANDBOX_DIR/agent/skills:$AGENT_DIR/skills:ro")
+fi
+
+# podman container names allow only [a-zA-Z0-9_.-]; project dirs can contain anything.
+name_tag="$(basename "$CWD" | tr -c 'a-zA-Z0-9_.-' '_' | cut -c1-40)"
+name_tag="${name_tag:-project}"
+project_mount=(-v "$CWD:$CWD")
+[ "$NO_PROJECT" = 1 ] && project_mount=(--tmpfs "$CWD")
+
+# shellcheck disable=SC2206
+extra=(${PI_SANDBOX_EXTRA_ARGS:-})
+
+# Not exec'd so the EXIT trap can remove $run_dir.
+podman run --rm "${tty_flags[@]}" \
+  --name "pi-${name_tag}-$$" --hostname pi-sandbox \
+  --userns=keep-id \
+  --network="$net" \
+  --security-opt=no-new-privileges --security-opt=label=disable --cap-drop=ALL \
+  --tmpfs /tmp:rw,exec \
+  "${project_mount[@]}" -w "$CWD" \
+  "${state_mounts[@]}" "${dev_mounts[@]}" "${clip_args[@]}" "${ide_args[@]}" \
+  -v "$run_dir/gitconfig:$HOME/.gitconfig:ro" \
+  -v "$run_dir/claude-settings.json:$HOME/.claude/settings.json:ro" \
+  -e TERM -e COLORTERM -e LANG -e LC_ALL -e "HOME=$HOME" \
+  -e LLAMA_BASE_URL -e LLAMA_API_KEY -e LLAMA_SERVER_URL \
+  "${extra[@]}" \
+  "$IMAGE" "$@"

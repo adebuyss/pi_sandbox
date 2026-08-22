@@ -1,0 +1,9 @@
+{
+  "_comment": "Rendered by the wrapper and mounted at ~/.claude/settings.json INSIDE the pi sandbox only. context-mode reads permissions.allow from here to permit ctx_execute_file outside the project root. Your real ~/.claude/settings.json is not touched.",
+  "permissions": {
+    "allow": [
+      "Read(__HOME__/.pi/**)",
+      "Read(/tmp/**)"
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "packages": [
+    {
+      "source": "npm:pi-subagents",
+      "skills": [
+        "!skills/pi-subagents",
+        "!skills/council-mode"
+      ]
+    },
+    "npm:pi-mcp-adapter",
+    "npm:pi-web-access",
+    "npm:pi-markdown-preview",
+    "npm:pi-powerline-footer",
+    "npm:@joemccann/pi-exa",
+    "npm:context-mode",
+    "npm:@feniix/pi-statusline",
+    "git:github.com/mdsitton/pi-thinking-level",
+    "npm:@m4riok/pi-ide-bridge",
+    "https://github.com/gsanhueza/pi-llama-cpp"
+  ],
+  "theme": "dark",
+  "defaultThinkingLevel": "medium",
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 10000,
+    "keepRecentTokens": 20000
+  },
+  "hideThinkingBlock": false,
+  "images": {
+    "autoResize": false
+  }
+}

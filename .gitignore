@@ -1,0 +1,8 @@
+# local git identity override (see templates/gitconfig)
+/gitconfig
+# editor/backup droppings
+*.bak-*
+*~
+mcp/test-output.txt
+# kept locally only
+/disabled-extensions/
