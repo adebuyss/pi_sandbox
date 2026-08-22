@@ -3,7 +3,7 @@
  * pi-mcp — expose the pi coding agent (headless) as MCP tools for any MCP
  * client (Claude Code, Cursor, Claude Desktop, ...).
  *
- * Zero dependencies. Node 22+ (pi requires >=22.19). Stdio transport. No build step.
+ * Zero dependencies. Node 18+. Stdio transport. No build step.
  *
  * Requires the `pi` CLI on PATH (npm i -g @earendil-works/pi-coding-agent).
  * The child pi process inherits the server's environment, so pi's normal
@@ -115,6 +115,11 @@ const RUN_PROPS = {
   append_system_prompt: { type: "string", description: "Extra system prompt text for this run" },
   save_session: { type: "boolean", description: "Persist the session so pi_continue can resume it (default true)" },
   timeout_minutes: { type: "number", description: "Hard timeout in minutes, 1-60 (default 10)" },
+  include_message_ends: {
+    type: "boolean",
+    description:
+      "Keep intermediate messages (tool results, prior turns) and return them in `messages`. Default false: only the final message is kept. Either way, individual events over ~1 MB (e.g. a huge tool result) are dropped as they stream, so bulky output never trips the size cap.",
+  },
 };
 
 const TOOLS = [
@@ -178,7 +183,17 @@ function textResult(payload) {
   return { content: [{ type: "text", text: cap(text) }] };
 }
 
-function spawnCapture(argv, { cwd, timeoutMs }) {
+// `filter` null -> accumulate the raw stream (used by --list-models).
+// `filter` set  -> process the NDJSON stream line-by-line and retain only what
+// parsePiStream needs: the `session` event, any `error` events, `agent_end`
+// (with its .messages trimmed to just the final assistant message), and
+// `message_end` events. By default only the LAST message_end is kept; with
+// filter.keepAllMessageEnds every message_end is kept. Everything else
+// (deltas, message_start, turn_*, tool_execution_*) is dropped as it arrives,
+// and any single event line larger than LINE_CAP (e.g. a multi-MB tool result
+// or an untrimmed agent_end) is abandoned mid-stream — so bulky tool output can
+// never accumulate toward the 2 MB cap the way it did before.
+function spawnCapture(argv, { cwd, timeoutMs, filter = null }) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (fn) => {
@@ -194,21 +209,12 @@ function spawnCapture(argv, { cwd, timeoutMs }) {
       finish(() => reject(e));
       return;
     }
-    let out = "";
     let err = "";
     const killLater = setTimeout(() => child.kill("SIGKILL"), timeoutMs + 5000);
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
       finish(() => reject(new Error(`pi run timed out after ${Math.round(timeoutMs / 1000)}s (killed)`)));
     }, timeoutMs);
-    child.stdout.on("data", (d) => {
-      out += d.toString("utf8");
-      if (out.length > MAX_CHILD_STDOUT) {
-        clearTimeout(timer);
-        child.kill("SIGKILL");
-        finish(() => reject(new Error("pi output exceeded 2 MB, killed")));
-      }
-    });
     child.stderr.on("data", (d) => {
       err += d.toString("utf8");
     });
@@ -217,10 +223,96 @@ function spawnCapture(argv, { cwd, timeoutMs }) {
       clearTimeout(killLater);
       finish(() => reject(new Error(`Failed to start pi CLI: ${e.message}`)));
     });
+
+    if (!filter) {
+      let out = "";
+      child.stdout.on("data", (d) => {
+        out += d.toString("utf8");
+        if (out.length > MAX_CHILD_STDOUT) {
+          clearTimeout(timer);
+          child.kill("SIGKILL");
+          finish(() => reject(new Error("pi output exceeded 2 MB, killed")));
+        }
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        clearTimeout(killLater);
+        finish(() => resolve({ code, out, err }));
+      });
+      return;
+    }
+
+    const keepAll = !!filter.keepAllMessageEnds;
+    const LINE_CAP = 1_000_000; // a single event line larger than this is dropped as bulk
+    let carry = "";
+    let dropping = false; // skipping the remainder of an oversized line
+    let sessionLine = null;
+    let agentEndLine = null;
+    const errorLines = [];
+    const ends = []; // retained message_end lines
+    let endsBytes = 0;
+    const pushEnd = (line) => {
+      ends.push(line);
+      endsBytes += line.length + 1;
+      // keepAll: drop oldest only if the retained set exceeds the byte cap.
+      // default: keep only the last message_end.
+      while (ends.length > 1 && (keepAll ? endsBytes > MAX_CHILD_STDOUT : true)) {
+        endsBytes -= ends.shift().length + 1;
+      }
+    };
+    const onLine = (line) => {
+      if (!line) return;
+      let ev;
+      try {
+        ev = JSON.parse(line);
+      } catch {
+        return;
+      }
+      switch (ev.type) {
+        case "session":
+          sessionLine = line;
+          break;
+        case "error":
+          errorLines.push(line);
+          break;
+        case "agent_end":
+          if (Array.isArray(ev.messages))
+            ev.messages = ev.messages.filter((m) => m?.role === "assistant").slice(-1);
+          agentEndLine = JSON.stringify(ev);
+          break;
+        case "message_end":
+          pushEnd(line);
+          break;
+        default:
+          break; // dropped
+      }
+    };
+    child.stdout.on("data", (d) => {
+      carry += d.toString("utf8");
+      let idx;
+      while ((idx = carry.indexOf("\n")) >= 0) {
+        const line = carry.slice(0, idx);
+        carry = carry.slice(idx + 1);
+        if (dropping) {
+          dropping = false;
+          continue;
+        } // this newline ends a dropped oversized line
+        onLine(line);
+      }
+      if (carry.length > LINE_CAP) {
+        dropping = true;
+        carry = "";
+      } // abandon an oversized, still-unterminated line
+    });
     child.on("close", (code) => {
       clearTimeout(timer);
       clearTimeout(killLater);
-      finish(() => resolve({ code, out, err }));
+      const lines = [];
+      if (sessionLine) lines.push(sessionLine);
+      lines.push(...errorLines);
+      if (agentEndLine) lines.push(agentEndLine);
+      lines.push(...ends);
+      finish(() => resolve({ code, out: lines.join("\n"), err }));
     });
   });
 }
@@ -245,6 +337,13 @@ function parsePiStream(out) {
   let agentEnd = null;
   let lastAssistant = null;
   let error = null;
+  const messages = [];
+  const textOf = (msg) =>
+    (msg?.content || [])
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join("\n")
+      .trim();
   for (const line of lines) {
     let ev;
     try {
@@ -254,18 +353,16 @@ function parsePiStream(out) {
     }
     if (ev.type === "session") session = ev;
     if (ev.type === "agent_end") agentEnd = ev;
-    if (ev.type === "message_end" && ev.message?.role === "assistant") lastAssistant = ev.message;
+    if (ev.type === "message_end" && ev.message) {
+      if (ev.message.role === "assistant") lastAssistant = ev.message;
+      messages.push({ role: ev.message.role, text: textOf(ev.message) });
+    }
     if (ev.type === "error") error = ev;
   }
   const finalMsg =
     (agentEnd?.messages || []).filter((m) => m.role === "assistant").pop() || lastAssistant;
-  const text =
-    (finalMsg?.content || [])
-      .filter((c) => c.type === "text")
-      .map((c) => c.text)
-      .join("\n")
-      .trim() || "";
-  return { session, finalMsg, text, error };
+  const text = textOf(finalMsg) || "";
+  return { session, finalMsg, text, error, messages };
 }
 
 async function runPi(args, { fresh }) {
@@ -274,9 +371,14 @@ async function runPi(args, { fresh }) {
   const minutes = Math.min(Math.max(Number(args.timeout_minutes ?? 10) || 10, 1), 60);
   const timeoutMs = minutes * 60_000;
   const argv = buildArgs(args, { fresh });
-  log(`${fresh ? "pi_run" : "pi_continue"} cwd=${cwd} bash=${!!args.allow_bash} timeout=${minutes}m`);
-  const { code, out, err } = await spawnCapture(argv, { cwd, timeoutMs });
-  const { session, finalMsg, text, error } = parsePiStream(out);
+  const keepAll = args.include_message_ends === true;
+  log(`${fresh ? "pi_run" : "pi_continue"} cwd=${cwd} bash=${!!args.allow_bash} timeout=${minutes}m keepAll=${keepAll}`);
+  const { code, out, err } = await spawnCapture(argv, {
+    cwd,
+    timeoutMs,
+    filter: { keepAllMessageEnds: keepAll },
+  });
+  const { session, finalMsg, text, error, messages } = parsePiStream(out);
   const result = {
     ok: code === 0 && !error,
     cwd,
@@ -289,6 +391,7 @@ async function runPi(args, { fresh }) {
     thinking: args.thinking ?? "default",
     text,
   };
+  if (keepAll) result.messages = messages.map((m) => ({ role: m.role, text: cap(m.text) }));
   if (error) result.pi_error = typeof error === "string" ? error : JSON.stringify(error);
   if (code !== 0 && err) result.stderr = err.slice(-2000);
   return textResult(result);
