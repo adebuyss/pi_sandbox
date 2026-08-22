@@ -15,14 +15,29 @@ keys required.
 
 ## Setup
 
-Requires `pi` on PATH (`npm i -g @earendil-works/pi-coding-agent`).
+Requires a `pi` binary (`npm i -g @earendil-works/pi-coding-agent`, or the
+sandbox wrapper from this repo).
 
-**With pi-sandbox:** when `pi` on PATH is the sandbox wrapper from this repo,
-every `pi_run` / `pi_continue` runs inside the container, confined to its `cwd`
-(the wrapper refuses `$HOME` and `/`). `pi_models` works from any directory
-because the wrapper runs `--list-models` without mounting a project. The child
-inherits `LLAMA_BASE_URL` etc. from the MCP server's environment, so local
-models keep working.
+**Which `pi` it runs.** The server resolves the binary deterministically so it
+doesn't depend on the PATH it happened to be launched with:
+
+```
+$PI_MCP_BIN  →  ~/pi-sandbox/pi (if executable)  →  "pi" (from PATH)
+```
+
+So if this repo's wrapper is installed at `~/pi-sandbox/pi`, **every run is
+sandboxed by default**, regardless of how the MCP client started this server.
+Set `PI_MCP_BIN` to force a specific binary (e.g. an unsandboxed pi). The chosen
+path is logged on each call (`pi=…`).
+
+**With the sandbox wrapper:** every `pi_run` / `pi_continue` runs inside the
+container, confined to its `cwd` — verified `PI_SANDBOX=1`, hostname
+`pi-sandbox`, cwd mounted at its real path, minimal home. The wrapper **refuses
+`$HOME` and `/`** (that would mount your whole home), so always pass an explicit
+project `cwd`; use `PI_SANDBOX_ALLOW_HOME=1` to override. `pi_models` works from
+any directory (it runs `--list-models` without mounting a project). The child
+inherits `LLAMA_BASE_URL` etc. from the server's environment, so local models
+keep working.
 
 ### Claude Code (user scope — available in every project)
 
@@ -72,6 +87,7 @@ Common `pi_run` / `pi_continue` parameters:
 | `save_session` | true | persist so `pi_continue` can resume (run-only: set false to skip) |
 | `timeout_minutes` | 10 | hard kill, 1–60 |
 | `append_system_prompt` | — | extra system prompt for this run |
+| `include_message_ends` | false | keep every intermediate message and return them in a `messages` array; default keeps only the final answer |
 
 ## Notes & limits
 
@@ -79,9 +95,16 @@ Common `pi_run` / `pi_continue` parameters:
   typical pi run, raise it. Claude Code: `MCP_TOOL_TIMEOUT=600000` (ms) env var.
 - **Safety:** `bash` is excluded by default. Only pass `allow_bash: true` when
   you want pi to run commands in that directory.
-- **Sessions:** saved under pi's normal session dir (`~/.pi/agent/sessions`).
-- **Output cap:** responses are truncated at 100 KB; the full text stays in pi's
-  saved session if you need it.
+- **Sessions:** saved under pi's normal session dir (`~/.pi/agent/sessions`);
+  to watch a run live, `tail -f` the newest `.jsonl` there.
+- **Message filtering:** pi's `--mode json` stream is parsed incrementally and
+  only the **last** message is kept by default (with `session`/`error` and a
+  trimmed `agent_end`). Intermediate messages, deltas, and any single event
+  larger than ~1 MB (e.g. a huge tool result) are dropped as they stream, so
+  bulky bash/grep output can't blow the buffer. Pass `include_message_ends:true`
+  to keep them all in `messages`.
+- **Output cap:** each returned message's text is truncated at 100 KB; the full
+  text stays in pi's saved session if you need it.
 - **One call = one answer:** the client waits for pi to finish; there is no
   streaming of intermediate steps back to the client.
 - **Not a proxy for everything:** this wraps pi's *headless CLI*. For richer
