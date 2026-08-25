@@ -16,10 +16,14 @@ ARG PACKAGES_SHA=unknown
 # Base toolchain: coding basics + ImageMagick so pasted/attached images can be
 # inspected and converted out of the box. jq is used by the build itself.
 # wl-clipboard is inert unless the wrapper is started with PI_SANDBOX_CLIPBOARD=1.
+# fonts-urw-base35 is a Recommends of imagemagick that --no-install-recommends
+# drops; without it ImageMagick's default font (Helvetica, mapped to the URW
+# Nimbus fonts in type-ghostscript.xml) is missing and every text-rendering
+# path -- montage, label:, -annotate -- aborts with SIGABRT unless -font is given.
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       git ripgrep fd-find tmux curl ca-certificates procps less jq \
-      python3 imagemagick wl-clipboard \
+      python3 imagemagick fonts-urw-base35 wl-clipboard \
  && rm -rf /var/lib/apt/lists/*
 
 # Expanded toolchain (optional): pip/venv/Pillow for scripted image work, ffmpeg

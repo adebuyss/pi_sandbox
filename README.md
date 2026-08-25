@@ -92,7 +92,7 @@ directory (this is what lets the MCP server's `pi_models` work).
 ```
 podman run --rm -it --userns=keep-id \
   --network=pasta:-T,8080,-T,11434 \                 # container 127.0.0.1:PORT → host loopback
-  --cap-drop=ALL --security-opt=no-new-privileges --security-opt=label=disable \
+  --cap-drop=ALL --security-opt=no-new-privileges --security-opt=label=disable --ulimit core=0 \
   --tmpfs /tmp \
   -v "$PWD:$PWD" -w "$PWD" \                         # the project
   -v ~/.pi/agent/sessions/--home-you-project--:…  \  # only THIS project's sessions
