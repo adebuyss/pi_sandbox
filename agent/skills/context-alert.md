@@ -34,11 +34,20 @@ livelock, ~40x slowdown). So instead of compacting at the ceiling, hand off at t
 
 1. **At task start**, register:
    `context_alert({ action: "set", percent: 50, message: "mission checkpoint -> ~/.pi/agent/missions/", holdCompaction: true })`
-2. **When it fires**, write your mission file to `~/.pi/agent/missions/<date>-<short-task-slug>.md`
-   (this directory is writable in the sandbox and survives container restarts). Contents:
-   the mission as given, what is DONE (with file paths of results already written), key facts
-   and conclusions gathered so far, what REMAINS as a concrete plan, and the exact next step.
-   Write it so a fresh session with zero context can continue from it alone.
+2. **When it fires, checkpoint — by delegation if you can.** The mission file goes to
+   `~/.pi/agent/missions/<date>-<short-task-slug>.md` (writable in the sandbox, survives
+   container restarts). Contents: the mission as given, what is DONE (with file paths of
+   results already written), key facts and conclusions gathered so far, what REMAINS as a
+   concrete plan, and the exact next step — written so a fresh session with zero context can
+   continue from it alone.
+   **If you have the `subagent` tool, do not write this yourself** — the model spends heavy
+   thinking tokens exactly when your window is scarcest. Spawn a forked checkpoint child
+   (it inherits your full session, thinks in its OWN window, and costs you one cheap turn):
+   ```typescript
+   subagent({ workflowScript: `return runs.run("checkpoint", { agent: "worker", context: "fork",
+     task: "Write a mission handoff file to ~/.pi/agent/missions/<date>-<slug>.md: the mission, what is DONE (paths), key facts and conclusions, what REMAINS as a plan, the exact next step. Write for a reader with zero context. Return only the file path." })` })
+   ```
+   Only self-write when no subagent tool is available (plain workers).
 3. **Then hand off or change gear — by role**:
    - A **subagent**: return now — final message "context at 50% — respawn me from
      missions/<file>". The orchestrator relaunches a fresh child from the file. If a tool or
@@ -49,3 +58,9 @@ livelock, ~40x slowdown). So instead of compacting at the ceiling, hand off at t
      running. Spawn children and block-wait on them, or work alone; never interleave. The
      checkpoint file is still worth writing (crash insurance and a ready `/new` seed if the
      session ever needs a fresh start), but handing off is optional for the main thread.
+   - **Full-context handoff (option)**: when the remaining work depends on context a file
+     cannot carry — images you viewed, subtle judgment calls mid-formation — hand off to a
+     `context: "fork"` continuation child instead of a fresh-from-file respawn: it inherits
+     everything. Know the cost: the fork STARTS at your current fullness, so use it only when
+     the remainder is short, and set its alert at ~75% with "write results to disk, then
+     finish" rather than another respawn.
