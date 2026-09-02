@@ -7,6 +7,12 @@ description: "Orchestrate pi-subagents: delegate to children, workflowScript fan
 
 Single entry point for subagent work. The installed package is the source of truth; this file routes to it and adds the knowledge its skill lacks.
 
+## Scripting language
+
+The sandbox has python3 (+pip/venv/Pillow/ffmpeg). Write **Python, not bash**, for anything
+beyond a few commands — file manipulation, parsing, data munging, orchestration glue — and
+include the same instruction when prompting children. Bash stays for one-liners and pipelines.
+
 ## Model-server concurrency budget (HARD RULES — local vLLM)
 
 The model server decodes at most 2 requests at once (MAX_SEQS=2); two streams whose contexts
