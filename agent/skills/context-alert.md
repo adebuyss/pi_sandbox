@@ -39,12 +39,13 @@ livelock, ~40x slowdown). So instead of compacting at the ceiling, hand off at t
    the mission as given, what is DONE (with file paths of results already written), key facts
    and conclusions gathered so far, what REMAINS as a concrete plan, and the exact next step.
    Write it so a fresh session with zero context can continue from it alone.
-3. **Then hand off instead of continuing**:
-   - If a tool or command is available to start a fresh session seeded with a prompt, use it
-     with the mission file as the prompt.
-   - A subagent: return now — final message "context at 50% — respawn me from
-     missions/<file>". The orchestrator relaunches a fresh child from the file.
-   - The main thread with no self-respawn path: tell the user the mission file is ready and
-     ask them to `/new` with it.
-
-Do not sail past 50% "to finish one more step" — the checkpoint turn is the step.
+3. **Then hand off or change gear — by role**:
+   - A **subagent**: return now — final message "context at 50% — respawn me from
+     missions/<file>". The orchestrator relaunches a fresh child from the file. If a tool or
+     command exists to start a fresh session seeded with a prompt, that works too. Do not
+     sail past 50% "to finish one more step" — the checkpoint turn is the step.
+   - The **main thread** may keep working past 50% — its solo request always fits the pool.
+     What changes at 50% is concurrency: from here on, do not take turns while subagents are
+     running. Spawn children and block-wait on them, or work alone; never interleave. The
+     checkpoint file is still worth writing (crash insurance and a ready `/new` seed if the
+     session ever needs a fresh start), but handing off is optional for the main thread.

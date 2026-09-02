@@ -18,12 +18,19 @@ slowdown, orphaned requests that survive aborts). Budget accordingly:
 2. **Image work: at most 1 image-carrying stream at a time.** A preempted image request can
    kill the engine outright (mm-embeds resume crash). Serialize image-heavy children; do not
    run your own image turns while an image-carrying child is active.
-3. **Every stream stays under ~50% of the context window** (~96k tokens) so two streams can
-   never outgrow the pool. When spawning a child, include in its prompt: "register a
-   context_alert at 50% with holdCompaction; when it fires, checkpoint your mission to
-   ~/.pi/agent/missions/ and hand off for respawn" — the context-alert skill documents the
-   checkpoint/respawn protocol. When a child returns asking for respawn, launch a FRESH child
-   whose prompt is its mission file (do not resume the full-context session).
+3. **Every CHILD stays under ~50% of the context window** (~96k tokens). When spawning a
+   child, include in its prompt: "register a context_alert at 50% with holdCompaction; when
+   it fires, checkpoint your mission to ~/.pi/agent/missions/ and hand off for respawn" —
+   the context-alert skill documents the protocol. When a child returns asking for respawn,
+   launch a FRESH child whose prompt is its mission file (do not resume the full-context
+   session).
+4. **The MAIN thread may grow past 50% — but then it waits instead of working alongside
+   agents.** A big context only pins the KV pool while a turn is running, so a large main
+   thread that blocks on its children costs nothing. Past ~50% of the window: spawn children
+   and WAIT for them (blocking waits; no interleaved main-thread turns, and don't take async
+   completion notifications as a cue to start unrelated work while others still run) — or
+   work alone with no children active. Below 50%, interleaving with one child is fine
+   (rule 1).
 
 ## Read first (once per task, ~2KB total)
 - Package skill — router table + always-on constraints:
