@@ -20,12 +20,33 @@
  *   prefix-cache miss; lmcache absorbs most of the refill).
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Key } from "@earendil-works/pi-tui";
 
 const ENTRY_TYPE = "preserve-thinking";
 const envDefault = (process.env.PI_PRESERVE_THINKING ?? "on").toLowerCase() !== "off";
 
 export default function (pi: ExtensionAPI) {
   let preserve = envDefault;
+
+  const paint = (ctx: ExtensionContext) => {
+    // Footer indicator: muted when preserving (the long-standing default), accent when
+    // stripping so the changed behavior stays visible.
+    ctx.ui.setStatus("preserve-thinking",
+      preserve ? ctx.ui.theme.fg("muted", "🧠 keep") : ctx.ui.theme.fg("accent", "🧠 strip"));
+  };
+
+  const apply = (value: boolean, ctx: ExtensionContext, announce = true) => {
+    preserve = value;
+    pi.appendEntry(ENTRY_TYPE, { preserve });
+    paint(ctx);
+    if (announce) {
+      ctx.ui.notify(
+        `preserve_thinking -> ${preserve ? "on" : "off"}. History re-renders on the next request` +
+        (preserve ? "" : " (prior-turn thinking stripped: ~halves context spend per turn)."),
+        "info",
+      );
+    }
+  };
 
   const restore = (ctx: ExtensionContext) => {
     for (const entry of ctx.sessionManager.getBranch() as any[]) {
@@ -35,7 +56,12 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  pi.on("session_start", async (_event, ctx) => { restore(ctx); });
+  pi.on("session_start", async (_event, ctx) => { restore(ctx); paint(ctx); });
+
+  pi.registerShortcut(Key.ctrlAlt("t"), {
+    description: "Toggle preserve_thinking (keep/strip prior-turn thinking in rendered history)",
+    handler: async (ctx: ExtensionContext) => { apply(!preserve, ctx); },
+  });
 
   pi.on("before_provider_request", async (event) => {
     const p = event.payload as any;
@@ -55,13 +81,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (args: string, ctx: ExtensionContext) => {
       const arg = (args ?? "").trim().toLowerCase();
       if (arg === "on" || arg === "off") {
-        preserve = arg === "on";
-        pi.appendEntry(ENTRY_TYPE, { preserve });
-        ctx.ui.notify(
-          `preserve_thinking -> ${arg}. History re-renders on the next request` +
-          (preserve ? "" : " (prior-turn thinking stripped: ~halves context spend per turn)."),
-          "info",
-        );
+        apply(arg === "on", ctx);
         return;
       }
       ctx.ui.notify(
