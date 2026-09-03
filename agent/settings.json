@@ -17,7 +17,7 @@
     "git:github.com/mdsitton/pi-thinking-level",
     "npm:@m4riok/pi-ide-bridge",
     "https://github.com/gsanhueza/pi-llama-cpp",
-    "npm:pi-repl-py"
+    "npm:pi-repl-py@0.6.14"
   ],
   "theme": "dark",
   "defaultThinkingLevel": "medium",
