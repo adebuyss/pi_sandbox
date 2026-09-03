@@ -15,6 +15,10 @@ ARG PACKAGES_SHA=unknown
 
 # Base toolchain: coding basics + ImageMagick so pasted/attached images can be
 # inspected and converted out of the box. jq is used by the build itself.
+# Archive tools: unzip + 7zip + bsdtar (libarchive-tools). Debian's 7zip is a
+# +dfsg repack with the RAR codec stripped and unrar is non-free-only, so
+# bsdtar is the RAR extractor here (reads RAR4/RAR5/zip/7z/iso).
+# fd-find installs the binary as fdfind; symlink it to the name everyone types.
 # wl-clipboard is inert unless the wrapper is started with PI_SANDBOX_CLIPBOARD=1.
 # fonts-urw-base35 is a Recommends of imagemagick that --no-install-recommends
 # drops; without it ImageMagick's default font (Helvetica, mapped to the URW
@@ -23,15 +27,17 @@ ARG PACKAGES_SHA=unknown
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       git ripgrep fd-find tmux curl ca-certificates procps less jq \
+      unzip 7zip libarchive-tools xxd tree \
       python3 imagemagick fonts-urw-base35 wl-clipboard \
+ && ln -s /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
 
 # Expanded toolchain (optional): pip/venv/Pillow for scripted image work, ffmpeg
-# for video. Uncomment to include; the sandbox-env note tells the agent what exists.
-# RUN apt-get update \
-#  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-#       python3-pip python3-venv python3-pil ffmpeg \
-#  && rm -rf /var/lib/apt/lists/*
+# for video. Comment out to omit; the sandbox-env note tells the agent what exists.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3-pip python3-venv python3-pil ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
 
 # pi itself goes to the image's default global prefix (/usr/local).
 RUN npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}" && npm cache clean --force
@@ -46,6 +52,7 @@ ENV PI_CODING_AGENT_DIR=/home/${USER}/.pi/agent
 ENV PATH=/home/${USER}/.pi/agent/bin:$PATH
 ENV PI_SKIP_VERSION_CHECK=1
 ENV PI_SANDBOX=1
+ENV PI_REPL_FORCE=1
 LABEL pi-sandbox.packages-sha=${PACKAGES_SHA}
 
 USER $USER

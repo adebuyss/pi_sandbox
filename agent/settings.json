@@ -16,7 +16,8 @@
     "npm:@feniix/pi-statusline",
     "git:github.com/mdsitton/pi-thinking-level",
     "npm:@m4riok/pi-ide-bridge",
-    "https://github.com/gsanhueza/pi-llama-cpp"
+    "https://github.com/gsanhueza/pi-llama-cpp",
+    "npm:pi-repl-py"
   ],
   "theme": "dark",
   "defaultThinkingLevel": "medium",
@@ -28,5 +29,22 @@
   "hideThinkingBlock": false,
   "images": {
     "autoResize": false
+  },
+  "subagents": {
+    "agentOverrides": {
+      "worker": {
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "edit",
+          "write",
+          "contact_supervisor",
+          "context_alert"
+        ]
+      }
+    }
   }
 }
