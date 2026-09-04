@@ -67,13 +67,30 @@ WORKDIR /home/${USER}
 #    restored in step 3, plus node_modules presence). git/https sources still use
 #    `pi install` per source. `pi install` rewrites settings.json with plain string entries; the repo copy
 #    is restored in step 3 so object entries (skill filters) survive.
+#
+#    allowScripts: npm 12 blocks dependency install scripts (preinstall/install/
+#    postinstall) by default and only warns about what it skipped. The policy is the
+#    `allowScripts` object in the package.json at the install prefix -- a flat map of
+#    npm-package-arg spec -> boolean (true allows, false denies). `--allow-scripts` is a
+#    hard error in a project-scoped install (it exists only for `npm i -g`/npx), so the
+#    generated package.json below carries the policy. Three packages here need their
+#    scripts and are named explicitly rather than blanket-approved, because what gets
+#    baked into the image is security-reviewed per package:
+#      context-mode    postinstall -- writes its .claude-plugin/.codex-plugin trees
+#      pi-repl-py      postinstall -- builds the ipykernel venv at ~/.pi/agent/pi-repl/venv
+#      better-sqlite3  install     -- native build (transitive dep of context-mode)
+#    Keys are bare names, not `pkg@version` pins: better-sqlite3 is transitive and its
+#    version floats, and a stale pin fails *silently* (script skipped, native module
+#    missing, breakage only at runtime). The version gate is the spec list in
+#    settings.json (e.g. pi-repl-py@0.6.14), not this policy.
+#    The package.json is written unconditionally so the policy is always present.
 COPY --chown=${UID}:${GID} agent/settings.json /home/${USER}/.pi/agent/settings.json
 RUN set -e; \
     npm_specs=$(jq -r '.packages[] | if type=="object" then .source else . end | select(startswith("npm:")) | sub("^npm:";"")' \
                 "$PI_CODING_AGENT_DIR/settings.json" | tr '\n' ' '); \
     if [ -n "$npm_specs" ]; then \
       mkdir -p "$PI_CODING_AGENT_DIR/npm"; \
-      if [ ! -f "$PI_CODING_AGENT_DIR/npm/package.json" ]; then echo '{"name":"pi-packages","private":true}' > "$PI_CODING_AGENT_DIR/npm/package.json"; fi; \
+      printf '%s\n' '{"name":"pi-packages","private":true,"allowScripts":{"context-mode":true,"pi-repl-py":true,"better-sqlite3":true}}' > "$PI_CODING_AGENT_DIR/npm/package.json"; \
       echo "==> npm install (single batch): $npm_specs"; \
       npm install $npm_specs --prefix "$PI_CODING_AGENT_DIR/npm" --legacy-peer-deps --no-audit --no-fund; \
     fi; \
