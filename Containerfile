@@ -39,6 +39,8 @@ RUN apt-get update \
       python3-pip python3-venv python3-pil ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
+RUN npm install -g npm@12.0.2
+
 # pi itself goes to the image's default global prefix (/usr/local).
 RUN npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}" && npm cache clean --force
 
@@ -60,11 +62,22 @@ WORKDIR /home/${USER}
 
 # 2. Install every package listed in agent/settings.json into the image
 #    (~/.pi/agent/npm for npm sources, ~/.pi/agent/git for git/https sources).
-#    `pi install` rewrites settings.json with plain string entries; the repo copy
+#    npm: sources go in ONE `npm install --prefix ~/.pi/agent/npm --legacy-peer-deps`
+#    (the exact args pi 0.84's own installNpmBatch uses; registration is settings.json,
+#    restored in step 3, plus node_modules presence). git/https sources still use
+#    `pi install` per source. `pi install` rewrites settings.json with plain string entries; the repo copy
 #    is restored in step 3 so object entries (skill filters) survive.
 COPY --chown=${UID}:${GID} agent/settings.json /home/${USER}/.pi/agent/settings.json
 RUN set -e; \
-    for src in $(jq -r '.packages[] | if type=="object" then .source else . end' \
+    npm_specs=$(jq -r '.packages[] | if type=="object" then .source else . end | select(startswith("npm:")) | sub("^npm:";"")' \
+                "$PI_CODING_AGENT_DIR/settings.json" | tr '\n' ' '); \
+    if [ -n "$npm_specs" ]; then \
+      mkdir -p "$PI_CODING_AGENT_DIR/npm"; \
+      if [ ! -f "$PI_CODING_AGENT_DIR/npm/package.json" ]; then echo '{"name":"pi-packages","private":true}' > "$PI_CODING_AGENT_DIR/npm/package.json"; fi; \
+      echo "==> npm install (single batch): $npm_specs"; \
+      npm install $npm_specs --prefix "$PI_CODING_AGENT_DIR/npm" --legacy-peer-deps --no-audit --no-fund; \
+    fi; \
+    for src in $(jq -r '.packages[] | if type=="object" then .source else . end | select(startswith("npm:") | not)' \
                  "$PI_CODING_AGENT_DIR/settings.json"); do \
       echo "==> pi install $src"; pi install "$src"; \
     done; \
