@@ -29,7 +29,7 @@ const MESSAGE_TYPE = "context-alert";
 const DEFAULT_ID = "default";
 const DEFAULT_PERCENT = Number(process.env.PI_CONTEXT_ALERT_DEFAULT_PERCENT ?? 75);
 const DEFAULT_MESSAGE = process.env.PI_CONTEXT_ALERT_DEFAULT_MESSAGE
-  ?? "Auto-compaction will soon replace your older messages with a summary; anything that exists only in your context (images you viewed, partial conclusions, lists you were building) may be lost. Write your results so far to disk now, in the format the task expects, then continue.";
+  ?? "You are approaching the point where older messages get summarised away, so anything that exists only in your context (images you viewed, partial conclusions, lists you were building) would be lost. Write your results so far to disk now, in the format the task expects, then continue the task. Do not restructure your plan around this notice.";
 
 interface Alert {
   id: string;
@@ -87,8 +87,15 @@ function deliver(pi: ExtensionAPI, ctx: ExtensionContext, a: Alert, why: string)
   const who = a.source === "tool"
     ? `You registered this alert (${a.id}); it has now deregistered itself — re-register if you want another ping.`
     : "This is the default context alert.";
+  // "No compaction has occurred" is not filler: a model that hits an unexplained state (a
+  // malformed tool call, a retry) reaches for the most salient available explanation, and a
+  // message describing compaction makes "I was compacted" that explanation. Observed 2026-09-04:
+  // a session read this alert, concluded "session_state indicates compaction", and rebuilt its
+  // state from disk although nothing had been summarised away.
   pi.sendMessage(
-    { customType: MESSAGE_TYPE, content: `[context-alert] ${text}. ${why} ${who}\n\n${a.message}`, display: true },
+    { customType: MESSAGE_TYPE,
+      content: `[context-alert] ${text}. ${why} ${who} Nothing has been removed from your context; `
+               + `this is a threshold notice, not a compaction.\n\n${a.message}`, display: true },
     { deliverAs: "steer", triggerTurn: true },
   );
   if (a.source === "tool") {
