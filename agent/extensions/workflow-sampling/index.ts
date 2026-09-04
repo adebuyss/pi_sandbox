@@ -16,11 +16,11 @@
  *      than the batch driver's 1.5 because Qwen warns higher values can cause language mixing --
  *      the one failure mode a JA->EN job can least afford.
  *
- *  code       min_p 0.05
+ *  code       (no overrides yet)
  *      Warm sampling flips ~1-2% of generated code into a syntax error (measured across FP8 and
- *      every 4-bit build alike -- it is model-inherent, not quantization damage). min_p discards
- *      tokens below 5% of the leader's probability, which is exactly the band a wrong bracket
- *      lives in, without dulling legitimately high-entropy choices.
+ *      every 4-bit build alike -- model-inherent, not quantization damage). min_p 0.05 is the
+ *      candidate fix, but Qwen recommends min_p 0.0 for both modes and the idea is untested here,
+ *      so the preset ships empty rather than shipping an unmeasured deviation.
  *
  *  default    nothing -- the model's own generation_config, untouched.
  *
@@ -46,11 +46,13 @@ const PRESETS: Record<string, Preset> = {
     badge: "🈯 translate",
     why: "presence_penalty 1.0 — breaks the !!!/…… token loops that repeated punctuation induces",
   },
-  code: {
-    params: { min_p: 0.05 },
-    badge: "⌨ code",
-    why: "min_p 0.05 — trims the sub-5% noise band where warm-sampling bracket flips live",
-  },
+  // No overrides yet, on purpose. min_p 0.05 is the obvious candidate -- it would discard the
+  // sub-5%-of-leader band where the measured ~1-2% warm-sampling bracket flips live -- but Qwen
+  // recommends min_p 0.0 for BOTH modes, and the idea has never been measured on this box. The
+  // translate preset deviates from the official set to fix an OBSERVED failure; deviating here
+  // would be fixing a hypothesised one. Test first: quality-battery.py --light --runs 100 with
+  // and without min_p, against the recorded 1.2% baseline (q5-orig, n=500), then fill this in.
+  code: { params: {}, badge: "⌨ code", why: "no overrides (min_p candidate pending measurement)" },
 };
 
 const envDefault = (() => {
