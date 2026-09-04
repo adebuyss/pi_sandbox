@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""Run one prompt over many images, concurrently, writing results to JSONL as it goes.
+
+Deliberately does NOT switch models: it runs against whatever profile is currently serving and
+adapts its concurrency to it. That makes it safe to call from inside an agent turn (Path A) and
+equally usable as an operator job on a dedicated batch profile (Path B) -- same script, same
+output, only the serving profile differs.
+
+  Path A (agent-callable, no switch):   python3 page-batch.py --dir pages/ --preset translate
+  Path B (operator, batch profile):     serve vllm <batch profile>, then the same command
+
+Resumable by construction: every completed page is appended to the JSONL immediately, and a rerun
+skips pages already present. Kill it, restart it, lose nothing but the pages in flight.
+
+Concurrency is left to the proxy's admission control when that is enabled -- this only bounds how
+many it offers at once. Defaults are inferred from the serving profile's max_model_len:
+a long-context (agent) profile implies few slots; a short-context (batch) profile implies more.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import mimetypes
+import os
+import re
+import sys
+import threading
+import time
+import urllib.request
+
+DEFAULT_URL = "http://127.0.0.1:8080/v1/chat/completions"
+MODELS_URL = "http://127.0.0.1:8080/v1/models"
+TIMEOUT = 900
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+
+# Conventions copied from readers/TRANSLATION-PROCEDURE.md so the output drops straight into the
+# pipeline's Phase 1 jsonl without a translation step in between.
+TRANSLATE_PROMPT = """Transcribe and translate this manga page.
+
+Output EXACTLY this structure, nothing else:
+
+JA:
+<the Japanese text, in reading order (right-to-left, top-to-bottom)>
+
+EN:
+<the English translation, same order>
+
+Conventions for the JA block:
+- speaker labels in lowercase romaji before the line: miko:「…」
+- stage directions in full-width parens: （top右: 彼女の顔）
+- sound effects inline: （SFX: びくびくびく）
+- thoughts/captions: caption:「…」
+- if the page has no text at all, write exactly: [no text]
+
+Conventions for the EN block:
+- same order and structure; speaker labels capitalised: Miko: '…'
+- gloss sound effects: (SFX: biku biku - twitching)
+- mirror the stage directions
+- transcribe what is on the page; mark unreadable text (reading uncertain), do not invent it
+- mark censored artwork as (censored) in stage directions rather than describing around it"""
+
+PRESETS = {"translate": TRANSLATE_PROMPT}
+THINK_RE = re.compile(r"<think>.*?</think>", re.S)
+PAGENUM_RE = re.compile(r"(\d+)")
+ITEM_RE = re.compile(r"\s*\d+\.\s*(.*)")
+
+# Qwen ships one generation_config (thinking-mode sampling). For non-thinking requests it recommends
+# a different set, and presence_penalty 1.5 is the part that matters: without it, numbered lists of
+# near-identical items (sound effects) degenerate into a repeated line until max_tokens (59/227 pages
+# on 2026-09-04). The vision-embed proxy injects this set only when it sees enable_thinking=false, so
+# a request that omits the flag gets neither the flag nor the penalty -- hence both are explicit here.
+NOTHINK_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5}
+LOOP_RUN = 5  # identical consecutive numbered items at/above which a page is flagged as looped
+
+
+def max_repeat(text: str) -> int:
+    """Longest run of consecutive numbered list items with identical bodies (loop detector)."""
+    best = cur = 1
+    prev = None
+    for ln in text.splitlines():
+        m = ITEM_RE.match(ln)
+        if not m:
+            prev, cur = None, 1
+            continue
+        body = m.group(1).strip()
+        cur = cur + 1 if (body and body == prev) else 1
+        best = max(best, cur)
+        prev = body
+    return best
+
+
+def file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def page_number(path: str) -> int | None:
+    m = PAGENUM_RE.findall(os.path.basename(path))
+    return int(m[-1]) if m else None
+
+
+def data_uri(path: str) -> str:
+    mime = mimetypes.guess_type(path)[0] or "image/jpeg"
+    with open(path, "rb") as f:
+        return f"data:{mime};base64," + base64.b64encode(f.read()).decode()
+
+
+def split_ja_en(text: str) -> tuple[str, str]:
+    """Parse the JA:/EN: blocks; falls back to putting everything in `en` if the model drifted."""
+    body = THINK_RE.sub("", text).strip()
+    m = re.search(r"JA:\s*(.*?)\s*(?:^|\n)EN:\s*(.*)", body, re.S)
+    if not m:
+        return "", body
+    ja, en = m.group(1).strip(), m.group(2).strip()
+    return ("" if ja == "[no text]" else ja), en
+
+
+def chat(url: str, model: str, prompt: str, image: str, max_tokens: int,
+         think: bool = False, effort: str | None = None, presence_penalty: float | None = None) -> dict:
+    """One page. Returns {text, reasoning, finish_reason, prompt_tokens, completion_tokens}.
+    Thinking is always set explicitly: the abliterated q5 template defaults it ON, stock defaults it OFF,
+    so an omitted flag means different behaviour per model."""
+    ctk: dict = {"enable_thinking": bool(think)}
+    body: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": image}},
+            {"type": "text", "text": prompt},
+        ]}],
+        "max_tokens": max_tokens,
+        "chat_template_kwargs": ctk,
+    }
+    if think:
+        ctk["preserve_thinking"] = True
+        if effort:
+            ctk["reasoning_effort"] = effort
+        # sampling: leave to the model's generation_config (thinking-mode set)
+        if presence_penalty is not None:
+            body["presence_penalty"] = presence_penalty
+    else:
+        body.update(NOTHINK_SAMPLING)
+        if presence_penalty is not None:
+            body["presence_penalty"] = presence_penalty
+    req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        data = json.load(r)
+    ch = data["choices"][0]
+    msg = ch["message"]
+    usage = data.get("usage") or {}
+    return {"text": msg.get("content") or "",
+            "reasoning": msg.get("reasoning_content") or msg.get("reasoning") or "",
+            "finish_reason": ch.get("finish_reason"),
+            "prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens")}
+
+
+def probe_profile(url: str) -> tuple[str | None, int | None]:
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            d = json.load(r)["data"][0]
+        return d["id"], d.get("max_model_len")
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--dir", help="directory of images (sorted by filename)")
+    src.add_argument("--files", nargs="+", help="explicit image paths, in order")
+    ap.add_argument("--out", required=True, help="JSONL output; existing pages are skipped")
+    ap.add_argument("--preset", choices=sorted(PRESETS), help="built-in prompt (translate = the manga pipeline's Phase 1)")
+    ap.add_argument("--prompt", help="literal prompt text")
+    ap.add_argument("--prompt-file", help="read the prompt from a file")
+    ap.add_argument("--concurrency", type=int, default=0, help="0 = infer from the serving profile")
+    ap.add_argument("--max-tokens", type=int, default=3000, help="completion cap; with --think this covers reasoning + answer, so raise it (8000+)")
+    ap.add_argument("--think", action="store_true", help="enable thinking (explicit; default is OFF on every model). Reasoning is stored in the record's `think` field")
+    ap.add_argument("--effort", choices=["xhigh", "medium", "low"], help="reasoning_effort for --think (template default xhigh)")
+    ap.add_argument("--presence-penalty", type=float, help="override (default 1.5 without --think, model default with it)")
+    ap.add_argument("--url", default=DEFAULT_URL)
+    ap.add_argument("--limit", type=int, default=0, help="process at most N pending pages (0 = all)")
+    ap.add_argument("--dry-run", action="store_true", help="list what would run, contact nothing")
+    args = ap.parse_args()
+
+    prompt = (PRESETS[args.preset] if args.preset
+              else open(args.prompt_file).read() if args.prompt_file
+              else args.prompt)
+    if not prompt:
+        ap.error("one of --preset / --prompt / --prompt-file is required")
+
+    if args.dir:
+        files = sorted(os.path.join(args.dir, f) for f in os.listdir(args.dir)
+                       if os.path.splitext(f)[1].lower() in IMAGE_EXT)
+    else:
+        files = list(args.files)
+    if not files:
+        print("no images found", file=sys.stderr)
+        return 2
+
+    done: set[int] = set()
+    if os.path.exists(args.out):
+        with open(args.out) as f:
+            for line in f:
+                try:
+                    done.add(int(json.loads(line)["page"]))
+                except Exception:  # noqa: BLE001
+                    pass
+    pending = [(page_number(p) or i + 1, p) for i, p in enumerate(files)]
+    pending = [(n, p) for n, p in pending if n not in done]
+    if args.limit:
+        pending = pending[: args.limit]
+
+    model, mml = probe_profile(MODELS_URL)
+    conc = args.concurrency or (6 if (mml or 0) and mml <= 32000 else 2)
+    profile = "batch (short context)" if (mml or 0) and mml <= 32000 else "agent (long context)"
+    print(f"model={model} max_model_len={mml} -> {profile} profile, concurrency={conc}")
+    print(f"{len(files)} images, {len(done)} already done, {len(pending)} to process -> {args.out}")
+    if pending and conc <= 2 and len(pending) > 60:
+        print("NOTE: this is a large job on a long-context profile. A dedicated short-context "
+              "batch profile would run it roughly 2x faster (see HANDOFF Path B).")
+    if args.dry_run:
+        for n, p in pending[:10]:
+            print(f"  would process page {n}: {os.path.basename(p)}")
+        if len(pending) > 10:
+            print(f"  ... and {len(pending) - 10} more")
+        return 0
+    if not pending:
+        print("nothing to do")
+        return 0
+    if model is None:
+        print("could not reach the server", file=sys.stderr)
+        return 1
+
+    lock = threading.Lock()
+    out = open(args.out, "a")
+    counters = {"ok": 0, "failed": 0, "capped": 0, "looped": 0}
+    failures: list[tuple[int, str]] = []
+    t0 = time.time()
+    queue = list(pending)
+
+    def worker() -> None:
+        while True:
+            with lock:
+                if not queue:
+                    return
+                num, path = queue.pop(0)
+            try:
+                res = chat(args.url, model, prompt, data_uri(path), args.max_tokens,
+                           think=args.think, effort=args.effort, presence_penalty=args.presence_penalty)
+                text = res["text"]
+                rec: dict = {"page": num, "file": os.path.basename(path), "path": os.path.abspath(path),
+                             "sha256": file_sha256(path), "finish_reason": res["finish_reason"],
+                             "prompt_tokens": res["prompt_tokens"], "completion_tokens": res["completion_tokens"],
+                             "max_repeat": max_repeat(text)}
+                if args.think and res["reasoning"]:
+                    rec["think"] = res["reasoning"]
+                if args.preset == "translate":
+                    ja, en = split_ja_en(text)
+                    rec["ja"], rec["en"] = ja, en
+                    ok = bool(en)
+                else:
+                    rec["text"] = THINK_RE.sub("", text).strip()
+                    ok = bool(rec["text"])
+                if not ok:
+                    raise ValueError("empty response")
+                with lock:
+                    out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    out.flush()
+                    counters["ok"] += 1
+                    flags = []
+                    if rec["finish_reason"] == "length":
+                        counters["capped"] += 1; flags.append("CAP")
+                    if rec["max_repeat"] >= LOOP_RUN:
+                        counters["looped"] += 1; flags.append(f"LOOP x{rec['max_repeat']}")
+                    n = counters["ok"] + counters["failed"]
+                    print(f"[{n}/{len(pending)}] page {num} ok {rec['completion_tokens']} tok"
+                          f"{(' ' + ' '.join(flags)) if flags else ''} ({time.time() - t0:.0f}s elapsed)", flush=True)
+            except Exception as e:  # noqa: BLE001
+                with lock:
+                    counters["failed"] += 1
+                    failures.append((num, f"{type(e).__name__}: {e}"))
+                    print(f"[!] page {num} FAILED: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(max(1, conc))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    out.close()
+
+    dt = time.time() - t0
+    print(f"\nprocessed {counters['ok']}, failed {counters['failed']}, in {dt / 60:.1f} min "
+          f"({counters['ok'] / max(dt / 60, 0.01):.1f} pages/min)")
+    print(f"results: {args.out}")
+    if counters["capped"] or counters["looped"]:
+        print(f"quality flags: {counters['capped']} hit max_tokens (finish_reason=length), "
+              f"{counters['looped']} looped (>= {LOOP_RUN} identical consecutive numbered items; see max_repeat)")
+    if failures:
+        print("failed pages (rerun the same command to retry only these):")
+        for num, why in failures[:10]:
+            print(f"  page {num}: {why}")
+    return 1 if counters["failed"] and not counters["ok"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -30,8 +30,8 @@ cd ~/some/project && pi        # sandboxed pi, same CLI, same sessions
 | `build.sh` | `podman build`; passes your uid/gid/user and a package-list fingerprint |
 | `pi` | the wrapper — symlink it to `~/.local/bin/pi` |
 | `agent/settings.json` | **source of truth for which pi packages the image contains** + sane defaults |
-| `agent/extensions/` | `sandbox-env`, `sandbox-audit`, `plan-mode` (baked into the image) |
-| `agent/skills/` | `pi-subagents-guide` (baked into the image) |
+| `agent/extensions/` | `sandbox-env`, `sandbox-audit`, `plan-mode`, `context-alert` (baked into the image) |
+| `agent/skills/` | `pi-subagents-guide`, `subagent-resume`, `context-alert` (baked into the image) |
 | `templates/` | `gitconfig` and `claude-settings.json`, rendered per run |
 | `mcp/` | the pi MCP server ([README](mcp/README.md)) |
 
@@ -126,8 +126,10 @@ podman run --rm -it --userns=keep-id \
   | `audit/` | rw | `sandbox-audit` log |
   | `missions/`, `powerline-footer/`, `web-search-cache/` | rw | pi-subagents, powerline footer, web-access state |
 
-* `/tmp` is a tmpfs: pi-subagents completion archives under `/tmp/pi-subagents-uid-*/`
-  vanish at exit; child session logs live under `sessions/` and persist.
+* `/tmp` is a tmpfs: pi-subagents run state under `/tmp/pi-subagents-uid-*/` (status.json,
+  results, leases, model exclusions) vanishes at exit; child session files live under
+  `sessions/<project>/<parent-session>/<runId>/` and persist. The `subagent-resume` skill
+  rebuilds the run record from them so `subagent({action:"resume"})` works after a restart.
 * **Agent-written skills/extensions are rescued, not kept.** `~/.pi/agent/{skills,extensions,
   prompts,themes}` are image-backed, so anything the agent writes there would vanish. On
   exit the wrapper diffs the container layer; if it finds files under those directories it
@@ -179,7 +181,22 @@ disappear with it.
   observe-only layer. `/audit` prints the log path. Review with
   `jq -c 'select(.flags|length>0)' ~/.pi/agent/audit/tool-calls.jsonl`.
 * **`plan-mode`** — read-only exploration mode (`/plan`), from pi's examples.
+* **`context-alert`** — `context_alert` tool + `/context-alert`: the model reads its own context
+  usage and registers alerts (percent, message, optional `holdCompaction`) that are delivered as a
+  steer message before the next LLM call, so it can checkpoint to disk before auto-compaction. A
+  default 75% alert fires in every session (`PI_CONTEXT_ALERT_DEFAULT_PERCENT`, 0 disables);
+  `agent/settings.json` adds the tool to the builtin `worker`'s allowlist via
+  `subagents.agentOverrides.worker.tools` — copy that block into your host `~/.pi/agent/settings.json`
+  (the wrapper mounts the host file), which this repo's setup already did.
 * **`pi-subagents-guide` skill** — short usage notes for pi-subagents.
+* **`subagent-resume` skill** — what to do when a turn, the parent, the container or the model
+  server died with children in flight: revive them from their persisted session files instead of
+  relaunching. Ships `scripts/subagent-recover.mjs` (`list` / `show` / `rebuild`), which finds the
+  surviving child sessions, prints a child's full last answer, and after a container restart
+  rebuilds the `status.json` that pi-subagents' native `resume` needs. Also documents the
+  model-availability traps: children probe the llama-server at their own startup, and a
+  `timed out` / `model not found` failure puts the model on pi-subagents' 24 h exclusion list
+  (only a pi restart clears it).
 
 
 ## Local models
@@ -268,7 +285,8 @@ agent, no token, no credential helper. Push from the host.
   commands, which breaks compound commands (`for`, `if`, `a && b`). The `sandbox-env` note
   tells the agent to use simple commands or the plain `bash` tool. Upstream bug.
 * pi-subagents' async completion notification truncates the child's return value at ~1000
-  chars (`subagent-executor.ts`, `slice(0, 1_000)`). Use `async: false` + an output file.
+  chars (`subagent-executor.ts`, `slice(0, 1_000)`). Use `async: false` + an output file, or
+  recover the full text with the `subagent-resume` script's `show <runId>`.
 
 ## Hardening not done
 

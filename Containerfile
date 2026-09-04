@@ -105,6 +105,7 @@ RUN set -e; \
 # 3. Extensions, skills, and the canonical settings.json.
 COPY --chown=${UID}:${GID} agent/extensions /home/${USER}/.pi/agent/extensions
 COPY --chown=${UID}:${GID} agent/skills     /home/${USER}/.pi/agent/skills
+COPY --chown=${UID}:${GID} agent/bin        /home/${USER}/.pi/agent/bin
 COPY --chown=${UID}:${GID} agent/settings.json /home/${USER}/.pi/agent/settings.json
 
 ENTRYPOINT ["pi"]

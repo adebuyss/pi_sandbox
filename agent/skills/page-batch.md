@@ -5,7 +5,7 @@ description: "Run one prompt over many images through the local vLLM server, wri
 
 # page-batch: one prompt over many images
 
-Driver: `~/ai_models/vllm/page-batch.py` on the HOST. Sends one image per request,
+Driver: `page-batch` (on PATH in the sandbox). Sends one image per request,
 several in flight, and appends each result to a JSONL file as it completes.
 
 **Use it when** a task means asking the same thing of many images (transcribe these
@@ -13,30 +13,27 @@ pages, categorise this folder, extract the text from these scans). **Do not use 
 for a handful of images — reading 3 pages with the `read` tool is faster than setting
 this up, and you keep them in context where you can reason about them.
 
-## 0. Can you actually run it? (check first)
+## 0. Where it lives
 
-The sandbox mounts only your project directory and `~/.pi/agent` state. `~/ai_models`
-is **not** mounted by default, so the script is usually NOT reachable from inside a
-session. Check:
+`page-batch` is on your PATH inside the sandbox (vendored into `~/.pi/agent/bin`
+at image build from the host's canonical copy). Just run it:
 
 ```
-ls ~/ai_models/vllm/page-batch.py 2>/dev/null || echo "not reachable from here"
+page-batch --help
 ```
 
-If it is not reachable, you have two honest options — pick one, do not fake it:
+Only `127.0.0.1:8080` is forwarded into the sandbox, so use the default URL (the
+proxy). **`:8180` is not reachable from here** — never point `--url` at it.
 
-1. **Hand the operator the command** to run on the host. This is normal and often
-   correct anyway, because large jobs want a dedicated serving profile (§2).
-2. Ask them to restart the session with the directory mounted:
-   `PI_SANDBOX_EXTRA_ARGS="-v $HOME/ai_models/vllm:$HOME/ai_models/vllm:ro" pi`
-
-Also: only `127.0.0.1:8080` is forwarded into the sandbox. **`:8180` is not** — always
-use the default URL (the proxy), never point `--url` at the upstream port from inside pi.
+If `page-batch` is somehow missing (an older image), say so and hand the operator
+the host command `~/ai_models/vllm/page-batch.py ...` rather than improvising a
+replacement — the flags and output format below are what the rest of the pipeline
+expects.
 
 ## 1. The command
 
 ```
-python3 ~/ai_models/vllm/page-batch.py \
+page-batch \
   --dir <images/> --out <work>-pages.jsonl --preset translate
 ```
 

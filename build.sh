@@ -15,6 +15,14 @@ done
 # ~/.pi/agent/settings.json and warns when the image is stale.
 sha="$(jq -cS '.packages' agent/settings.json | sha256sum | cut -c1-16)"
 
+# Vendored host tools: refresh from their canonical location so a rebuild never bakes a stale
+# copy. Skipped silently when the source is absent (this repo must build on a bare machine).
+CANON="$HOME/ai_models/vllm/page-batch.py"
+if [ -f "$CANON" ]; then
+  install -m 0755 "$CANON" agent/bin/page-batch
+  echo "vendored: agent/bin/page-batch <- $CANON"
+fi
+
 exec podman build \
   --build-arg "PI_VERSION=$PI_VERSION" \
   --build-arg "UID=$(id -u)" --build-arg "GID=$(id -g)" --build-arg "USER=$(id -un)" \
