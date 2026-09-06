@@ -22,17 +22,11 @@
  *      candidate fix, but Qwen recommends min_p 0.0 for both modes and the idea is untested here,
  *      so the preset ships empty rather than shipping an unmeasured deviation.
  *
- *  think      presence_penalty 0.5
- *      Qwen ships TWO presets: non-thinking carries presence_penalty 1.5, thinking carries 0.0.
- *      The proxy injects the non-thinking set only when enable_thinking is false, so a thinking
- *      request reaches the model with NO repetition protection at all -- which is exactly the
- *      configuration that degenerated into an unbounded "!!! - !!!" tail on a live high-effort
- *      session. Qwen's own remedy ("adjust presence_penalty between 0 and 2 to reduce endless
- *      repetition") is not scoped to either mode, so this is within the sanctioned range rather
- *      than a borrowed setting. 0.5 not 1.5: enough to break token-level loops, well below the
- *      level Qwen warns can induce language mixing.
- *
  *  default    nothing -- the model's own generation_config, untouched.
+ *
+ * Independently of the chosen preset, a presence_penalty floor of 0.5 is applied to any request
+ * with thinking explicitly on that has not set one (see THINKING_PRESENCE_FLOOR). Loop risk
+ * tracks the MODE, not the workload, so protection cannot depend on remembering to pick a preset.
  *
  * Explicit client parameters always win: a request that already sets presence_penalty keeps it.
  * The choice persists as a session entry (survives `pi -c` and subagent revival) and can be
@@ -63,12 +57,25 @@ const PRESETS: Record<string, Preset> = {
   // would be fixing a hypothesised one. Test first: quality-battery.py --light --runs 100 with
   // and without min_p, against the recorded 1.2% baseline (q5-orig, n=500), then fill this in.
   code: { params: {}, badge: "⌨ code", why: "no overrides (min_p candidate pending measurement)" },
-  think: {
-    params: { presence_penalty: 0.5 },
-    badge: "🧩 think",
-    why: "presence_penalty 0.5 — the only loop protection thinking mode otherwise has (Qwen's thinking preset is 0.0)",
-  },
 };
+
+// Applied on top of ANY preset when the request has thinking explicitly on and the caller set no
+// presence_penalty. Loop risk is a property of the MODE, not the workload -- Qwen's non-thinking
+// preset carries presence_penalty 1.5 but its thinking preset carries 0.0, and the proxy injects
+// the non-thinking set only when enable_thinking is false (app.py:667). A thinking request
+// therefore arrives with no repetition protection whatever, which is the configuration that
+// degenerated into an unbounded "!!! - !!!" tail on a live high-effort session. Qwen's documented
+// remedy -- "adjust presence_penalty between 0 and 2 to reduce endless repetition" -- is not
+// scoped to a mode, so this sits inside the sanctioned range. 0.5, not 1.5: enough to break
+// token-level loops, well under where Qwen warns of language mixing (fatal for a JA->EN job).
+const THINKING_PRESENCE_FLOOR = 0.5;
+
+// Only an EXPLICIT true. An absent flag is model-dependent -- stock Qwen's template reads
+// undefined as thinking-off, both abliterated builds read it as thinking-on -- so guessing would
+// silently apply a penalty to non-thinking traffic on one model and not the other. pi always
+// sends the flag, so nothing is lost by being strict.
+const thinkingOn = (p: any): boolean =>
+  p?.chat_template_kwargs?.enable_thinking === true;
 
 const envDefault = (() => {
   const v = (process.env.PI_WORKFLOW ?? "default").toLowerCase();
@@ -109,6 +116,10 @@ export default function (pi: ExtensionAPI) {
     if (!p || typeof p !== "object" || !preset) return undefined;
     for (const [k, v] of Object.entries(preset.params)) {
       if (p[k] === undefined) p[k] = v;   // never override what the caller set deliberately
+    }
+    // After the preset, so translate's explicit 1.0 stands and only an unset field is filled.
+    if (thinkingOn(p) && p.presence_penalty === undefined) {
+      p.presence_penalty = THINKING_PRESENCE_FLOOR;
     }
     return undefined;                      // payload mutated in place
   });
