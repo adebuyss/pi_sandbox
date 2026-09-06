@@ -24,9 +24,10 @@
  *
  *  default    nothing -- the model's own generation_config, untouched.
  *
- * Independently of the chosen preset, a presence_penalty floor of 0.5 is applied to any request
- * with thinking explicitly on that has not set one (see THINKING_PRESENCE_FLOOR). Loop risk
- * tracks the MODE, not the workload, so protection cannot depend on remembering to pick a preset.
+ * A presence_penalty floor of 0.5 is applied to any request with thinking explicitly on that has
+ * not set one (see THINKING_PRESENCE_FLOOR). Loop risk tracks the MODE, not the workload, so
+ * protection cannot depend on remembering to pick a preset. The one exception is `code`, which
+ * sets noThinkingFloor: penalising repeated tokens is actively wrong for code.
  *
  * Explicit client parameters always win: a request that already sets presence_penalty keeps it.
  * The choice persists as a session entry (survives `pi -c` and subagent revival) and can be
@@ -41,6 +42,8 @@ interface Preset {
   params: Record<string, number>;
   badge: string;
   why: string;
+  /** Opt out of THINKING_PRESENCE_FLOOR. See the `code` preset for why. */
+  noThinkingFloor?: boolean;
 }
 
 const PRESETS: Record<string, Preset> = {
@@ -56,7 +59,17 @@ const PRESETS: Record<string, Preset> = {
   // translate preset deviates from the official set to fix an OBSERVED failure; deviating here
   // would be fixing a hypothesised one. Test first: quality-battery.py --light --runs 100 with
   // and without min_p, against the recorded 1.2% baseline (q5-orig, n=500), then fill this in.
-  code: { params: {}, badge: "⌨ code", why: "no overrides (min_p candidate pending measurement)" },
+  // Also exempt from the thinking floor. Presence penalty is indiscriminate within a response --
+  // every token that has appeared takes the same hit -- and code repeats tokens by nature:
+  // identifiers, keywords, braces, indentation. Penalising a correct repeated identifier is a
+  // worse failure than the loop the floor prevents, and the degeneration that motivated the floor
+  // was punctuation-driven prose, not code.
+  code: {
+    params: {},
+    badge: "⌨ code",
+    why: "no overrides, and no thinking floor (presence penalty would tax correct repeated identifiers)",
+    noThinkingFloor: true,
+  },
 };
 
 // Applied on top of ANY preset when the request has thinking explicitly on and the caller set no
@@ -118,7 +131,7 @@ export default function (pi: ExtensionAPI) {
       if (p[k] === undefined) p[k] = v;   // never override what the caller set deliberately
     }
     // After the preset, so translate's explicit 1.0 stands and only an unset field is filled.
-    if (thinkingOn(p) && p.presence_penalty === undefined) {
+    if (!preset.noThinkingFloor && thinkingOn(p) && p.presence_penalty === undefined) {
       p.presence_penalty = THINKING_PRESENCE_FLOOR;
     }
     return undefined;                      // payload mutated in place
