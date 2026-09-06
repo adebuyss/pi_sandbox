@@ -22,6 +22,16 @@
  *      candidate fix, but Qwen recommends min_p 0.0 for both modes and the idea is untested here,
  *      so the preset ships empty rather than shipping an unmeasured deviation.
  *
+ *  think      presence_penalty 0.5
+ *      Qwen ships TWO presets: non-thinking carries presence_penalty 1.5, thinking carries 0.0.
+ *      The proxy injects the non-thinking set only when enable_thinking is false, so a thinking
+ *      request reaches the model with NO repetition protection at all -- which is exactly the
+ *      configuration that degenerated into an unbounded "!!! - !!!" tail on a live high-effort
+ *      session. Qwen's own remedy ("adjust presence_penalty between 0 and 2 to reduce endless
+ *      repetition") is not scoped to either mode, so this is within the sanctioned range rather
+ *      than a borrowed setting. 0.5 not 1.5: enough to break token-level loops, well below the
+ *      level Qwen warns can induce language mixing.
+ *
  *  default    nothing -- the model's own generation_config, untouched.
  *
  * Explicit client parameters always win: a request that already sets presence_penalty keeps it.
@@ -53,6 +63,11 @@ const PRESETS: Record<string, Preset> = {
   // would be fixing a hypothesised one. Test first: quality-battery.py --light --runs 100 with
   // and without min_p, against the recorded 1.2% baseline (q5-orig, n=500), then fill this in.
   code: { params: {}, badge: "⌨ code", why: "no overrides (min_p candidate pending measurement)" },
+  think: {
+    params: { presence_penalty: 0.5 },
+    badge: "🧩 think",
+    why: "presence_penalty 0.5 — the only loop protection thinking mode otherwise has (Qwen's thinking preset is 0.0)",
+  },
 };
 
 const envDefault = (() => {
