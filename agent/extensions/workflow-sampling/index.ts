@@ -131,6 +131,25 @@ export default function (pi: ExtensionAPI) {
       if (p[k] === undefined) p[k] = v;   // never override what the caller set deliberately
     }
     // After the preset, so translate's explicit 1.0 stands and only an unset field is filled.
+    // --- pi thinking level -> vLLM, two fixes (2026-09-06) --------------------------------------
+    // 1) pi sends the level as a top-level `reasoning_effort` (pi-llama-cpp maps levels 1:1); vLLM folds it into
+    //    the chat template, which accepts ONLY xhigh | medium | low and 400s on anything else ("Unexpected
+    //    reasoning effort high"). Map the two pi levels the template lacks onto their nearest neighbours.
+    // 2) pi-llama-cpp sends the level's budget as `thinking_budget_tokens` (llama.cpp's name). vLLM's field is
+    //    `thinking_token_budget`; the other is silently dropped, so no backstop was in effect. Rename it.
+    //    Measured: xhigh needs ~24k thinking tokens on enumerative prompts, medium ~2.7k, for the same answer.
+    // Explicit client values win in both cases.
+    const eff = (p as any).reasoning_effort;
+    if (eff === "high" || eff === "max") (p as any).reasoning_effort = "xhigh";
+    else if (eff === "minimal") (p as any).reasoning_effort = "low";
+    const rawBudget = (p as any).thinking_budget_tokens;
+    if (rawBudget !== undefined) {
+      delete (p as any).thinking_budget_tokens;
+      if (typeof rawBudget === "number" && rawBudget > 0 && p.thinking_token_budget === undefined) {
+        p.thinking_token_budget = rawBudget;
+      }
+    }
+    // ---------------------------------------------------------------------------------------------
     if (!preset.noThinkingFloor && thinkingOn(p) && p.presence_penalty === undefined) {
       p.presence_penalty = THINKING_PRESENCE_FLOOR;
     }
